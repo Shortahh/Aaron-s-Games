@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Horror Escape</title>
+  <style>
+    :root {
+      --bg: #05070b;
+      --panel: rgba(13, 18, 24, 0.85);
+      --danger: #ff4b4b;
+      --text: #eaf7ff;
+      --accent: #8ee3ff;
+      --good: #98f5a0;
+      --gold: #ffd76a;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top, #0c1620 0%, #070a10 40%, #030507 100%);
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: Arial, sans-serif;
+    }
+
+    .shell {
+      background: var(--panel);
+      border: 2px solid rgba(255,255,255,0.08);
+      border-radius: 18px;
+      padding: 16px;
+      box-shadow: 0 28px 80px rgba(0,0,0,0.55);
+    }
+
+    .hud {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 6px 12px;
+      font-weight: bold;
+      letter-spacing: 0.04em;
+    }
+
+    .left { color: var(--accent); }
+    .right { color: var(--danger); }
+
+    canvas {
+      display: block;
+      width: 720px;
+      height: 528px;
+      border-radius: 12px;
+      border: 2px solid rgba(255,255,255,0.08);
+      background: #03070d;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    button {
+      background: linear-gradient(135deg, #8ee3ff, #d9f5ff);
+      border: none;
+      color: #071018;
+      font-weight: bold;
+      border-radius: 10px;
+      padding: 10px 16px;
+      cursor: pointer;
+      transition: transform 0.12s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    button:active { transform: translateY(1px); }
+
+    .hint {
+      font-size: 12px;
+      opacity: 0.85;
+      letter-spacing: 0.04em;
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hud">
+      <div class="left">Relics: <span id="keys">0 / 3</span></div>
+      <div class="right">Status: <span id="status">Searching</span></div>
+    </div>
+
+    <canvas id="gameCanvas" width="720" height="528"></canvas>
+
+    <div class="controls">
+      <button id="restartBtn">Restart</button>
+      <button id="voiceBtn">Enable Voice</button>
+      <button id="soundBtn">Sound: On</button>
+      <div id="voiceStatus" class="hint" aria-live="polite">Voice off</div>
+      <div class="hint">Move with WASD / Arrow Keys or say: left, right, up, down, stop</div>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const keysEl = document.getElementById("keys");
+    const statusEl = document.getElementById("status");
+    const restartBtn = document.getElementById("restartBtn");
+    const voiceBtn = document.getElementById("voiceBtn");
+    const soundBtn = document.getElementById("soundBtn");
+    const voiceStatus = document.getElementById("voiceStatus");
+
+    const TILE = 48;
+    const COLS = canvas.width / TILE;
+    const ROWS = canvas.height / TILE;
+
+    const MAP = [
+      "11111111111111111111",
+      "10000000010000000001",
+      "10111101101111101001",
+      "10000100010000001001",
+      "10110111010111101001",
+      "10010000000100000001",
+      "10110111110111111001",
+      "10000100000000001001",
+      "10111101111101101001",
+      "10000000001000000001",
+      "11111111111111111111"
+    ];
+
+    const player = {
+      x: TILE * 1.5,
+      y: TILE * 1.5,
+      radius: 12,
+      speed: 175,
+      alive: true
+    };
+
+    const monster = {
+      x: TILE * 11.5,
+      y: TILE * 8.5,
+      radius: 16,
+      speed: 108
+    };
+
+    const exit = { x: TILE * 13.2, y: TILE * 1.3, w: 28, h: 28 };
+
+    const relics = [
+      { x: TILE * 2.5, y: TILE * 8.5, picked: false },
+      { x: TILE * 8.5, y: TILE * 4.5, picked: false },
+      { x: TILE * 12.5, y: TILE * 8.5, picked: false }
+    ];
+
+    const input = {
+      up: false,
+      down: false,
+      left: false,
+      right: false
+    };
+
+    let collected = 0;
+    let gameWon = false;
+    let scareFlash = 0;
+    let lastTime = 0;
+    let voiceEnabled = false;
+    let soundEnabled = true;
+    let recognition = null;
+    let audioCtx = null;
+    let masterGain = null;
+
+    function updateHud() {
+      keysEl.textContent = `${collected} / 3`;
+    }
+
+    function wallAt(x, y) {
+      const tileX = Math.floor(x / TILE);
+      const tileY = Math.floor(y / TILE);
+      if (tileX < 0 || tileY < 0 || tileX >= COLS || tileY >= ROWS) return true;
+      return MAP[tileY][tileX] === "1";
+    }
+
+    function circleCollidesWithWalls(cx, cy, radius) {
+      const points = [
+        [cx - radius, cy - radius],
+        [cx + radius, cy - radius],
+        [cx - radius, cy + radius],
+        [cx + radius, cy + radius],
+        [cx, cy - radius],
+        [cx, cy + radius],
+        [cx - radius, cy],
+        [cx + radius, cy]
+      ];
+
+      return points.some(([x, y]) => wallAt(x, y));
+    }
+
+    function moveEntity(entity, dx, dy) {
+      const nx = entity.x + dx;
+      const ny = entity.y + dy;
+
+      if (!circleCollidesWithWalls(nx, entity.y, entity.radius)) {
+        entity.x = nx;
+      }
+
+      if (!circleCollidesWithWalls(entity.x, ny, entity.radius)) {
+        entity.y = ny;
+      }
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function resetGame() {
+      player.x = TILE * 1.5;
+      player.y = TILE * 1.5;
+      player.alive = true;
+
+      monster.x = TILE * 11.5;
+      monster.y = TILE * 8.5;
+
+      collected = 0;
+      gameWon = false;
+      scareFlash = 0;
+      relics.forEach(r => r.picked = false);
+
+      statusEl.textContent = "Searching";
+      updateHud();
+    }
+
+    function isNear(a, b, radius) {
+      return Math.hypot(a.x - b.x, a.y - b.y) < radius;
+    }
+
+    function checkRelics() {
+      for (const relic of relics) {
+        if (!relic.picked && isNear(player, relic, 20)) {
+          relic.picked = true;
+          collected += 1;
+          statusEl.textContent = "Relic found";
+          playPickupSound();
+          updateHud();
+        }
+      }
+    }
+
+    function checkExit() {
+      if (collected >= 3 &&
+          player.x > exit.x &&
+          player.x < exit.x + exit.w &&
+          player.y > exit.y &&
+          player.y < exit.y + exit.h) {
+        gameWon = true;
+        statusEl.textContent = "Escaped";
+        playWinSound();
+      }
+    }
+
+    function updatePlayer(dt) {
+      if (!player.alive || gameWon) return;
+
+      let moveX = 0;
+      let moveY = 0;
+
+      if (input.left) moveX -= 1;
+      if (input.right) moveX += 1;
+      if (input.up) moveY -= 1;
+      if (input.down) moveY += 1;
+
+      if (moveX !== 0 || moveY !== 0) {
+        const len = Math.hypot(moveX, moveY) || 1;
+        moveX /= len;
+        moveY /= len;
+      }
+
+      moveEntity(player, moveX * player.speed * dt, moveY * player.speed * dt);
+      player.x = clamp(player.x, player.radius + 6, canvas.width - player.radius - 6);
+      player.y = clamp(player.y, player.radius + 6, canvas.height - player.radius - 6);
+    }
+
+    function updateMonster(dt) {
+      if (!player.alive || gameWon) return;
+
+      const dx = player.x - monster.x;
+      const dy = player.y - monster.y;
+      const dist = Math.hypot(dx, dy) || 1;
+
+      if (dist > 0) {
+        const nx = dx / dist;
+        const ny = dy / dist;
+
+        const step = monster.speed * dt;
+
+        const nextX = monster.x + nx * step;
+        const nextY = monster.y + ny * step;
+
+        if (!circleCollidesWithWalls(nextX, monster.y, monster.radius)) {
+          monster.x = nextX;
+        }
+
+        if (!circleCollidesWithWalls(monster.x, nextY, monster.radius)) {
+          monster.y = nextY;
+        }
+      }
+
+      if (isNear(player, monster, player.radius + monster.radius + 6)) {
+        player.alive = false;
+        statusEl.textContent = "Caught";
+        playHitSound();
+      }
+
+      if (dist < 170) {
+        scareFlash = Math.min(1, scareFlash + dt * 1.25);
+        if (Math.random() < 0.02) playRoarSound();
+      } else {
+        scareFlash = Math.max(0, scareFlash - dt * 1.4);
+      }
+    }
+
+    function drawMap() {
+      for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+          const tile = MAP[row][col];
+          const x = col * TILE;
+          const y = row * TILE;
+
+          if (tile === "1") {
+            ctx.fillStyle = "#171d25";
+            ctx.fillRect(x, y, TILE, TILE);
+            ctx.strokeStyle = "rgba(255,255,255,0.08)";
+            ctx.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
+          } else {
+            ctx.fillStyle = "rgba(14,16,22,0.75)";
+            ctx.fillRect(x, y, TILE, TILE);
+          }
+        }
+      }
+    }
+
+    function drawPlayer() {
+      ctx.fillStyle = "#ecf7ff";
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#8ee3ff";
+      ctx.fillRect(player.x - 4, player.y - 2, 8, 4);
+    }
+
+    function drawMonster() {
+      ctx.fillStyle = "#ff4b4b";
+      ctx.beginPath();
+      ctx.arc(monster.x, monster.y, monster.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "#2f0000";
+      ctx.beginPath();
+      ctx.arc(monster.x - 5, monster.y - 4, 4, 0, Math.PI * 2);
+      ctx.arc(monster.x + 5, monster.y - 4, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.strokeStyle = "#250000";
+      ctx.beginPath();
+      ctx.arc(monster.x, monster.y + 5, 7, 0, Math.PI);
+      ctx.stroke();
+    }
+
+    function drawRelics() {
+      for (const relic of relics) {
+        if (relic.picked) continue;
+        ctx.fillStyle = "#ffd76a";
+        ctx.fillRect(relic.x - 8, relic.y - 8, 16, 16);
+
+        ctx.fillStyle = "#f8d77a";
+        ctx.fillRect(relic.x + 6, relic.y - 2, 4, 8);
+      }
+    }
+
+    function drawExit() {
+      ctx.fillStyle = collected >= 3 ? "#98f5a0" : "#44586a";
+      ctx.fillRect(exit.x, exit.y, exit.w, exit.h);
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.strokeRect(exit.x + 0.5, exit.y + 0.5, exit.w - 1, exit.h - 1);
+    }
+
+    function drawFlashlight() {
+      const radius = 220;
+
+      ctx.fillStyle = "rgba(0,0,0,0.86)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.save();
+      ctx.globalCompositeOperation = "destination-out";
+
+      const glow = ctx.createRadialGradient(
+        player.x, player.y, 20,
+        player.x, player.y, radius
+      );
+      glow.addColorStop(0, "rgba(0,0,0,1)");
+      glow.addColorStop(0.4, "rgba(0,0,0,0.9)");
+      glow.addColorStop(1, "rgba(0,0,0,0.0)");
+
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      // add stronger center light
+      ctx.beginPath();
+      ctx.arc(player.x, player.y, 90, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawJumpScare() {
+      if (scareFlash <= 0) return;
+
+      ctx.fillStyle = `rgba(255, 30, 30, ${0.18 + scareFlash * 0.4})`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function drawTextOverlay() {
+      if (gameWon) {
+        ctx.fillStyle = "rgba(10, 12, 18, 0.7)";
+        ctx.fillRect(160, 200, 400, 120);
+
+        ctx.fillStyle = "#98f5a0";
+        ctx.font = "bold 40px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText("You Escaped", canvas.width / 2, canvas.height / 2 - 10);
+
+        ctx.fillStyle = "#edf8ff";
+        ctx.font = "22px Arial";
+        ctx.fillText("Press Restart to play again", canvas.width / 2, canvas.height / 2 + 30);
+      } else if (!player.alive) {
+        ctx.fillStyle = "rgba(10, 12, 18, 0.7)";
+        ctx.fillRect(190, 200, 340, 120);
+
+        ctx.fillStyle = "#ff4b4b";
+        ctx.font = "bold 42px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText("Caught", canvas.width / 2, canvas.height / 2 - 10);
+
+        ctx.fillStyle = "#edf8ff";
+        ctx.font = "22px Arial";
+        ctx.fillText("Press Restart to try again", canvas.width / 2, canvas.height / 2 + 30);
+      } else if (collected < 3) {
+        ctx.fillStyle = "rgba(255,255,255,0.12)";
+        ctx.fillRect(230, 20, 260, 38);
+
+        ctx.fillStyle = "#dfeeff";
+        ctx.font = "20px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(`Relics left: ${3 - collected}`, canvas.width / 2, 46);
+      }
+    }
+
+    function render() {
+      drawMap();
+      drawExit();
+      drawRelics();
+      drawMonster();
+      drawPlayer();
+
+      ctx.save();
+      drawFlashlight();
+      ctx.restore();
+
+      drawJumpScare();
+      drawTextOverlay();
+    }
+
+    function gameLoop(timestamp) {
+      const dt = Math.min((timestamp - lastTime) / 1000 || 0.016, 0.04);
+      lastTime = timestamp;
+
+      updatePlayer(dt);
+      checkRelics();
+      updateMonster(dt);
+      checkExit();
+
+      render();
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    // ---------- Input ----------
+    document.addEventListener("keydown", (event) => {
+      const key = event.key.toLowerCase();
+
+      if (key === "w" || key === "arrowup") input.up = true;
+      if (key === "s" || key === "arrowdown") input.down = true;
+      if (key === "a" || key === "arrowleft") input.left = true;
+      if (key === "d" || key === "arrowright") input.right = true;
+
+      if ((key === "r" || event.key === "Enter") && (!player.alive || gameWon)) {
+        resetGame();
+      }
+    });
+
+    document.addEventListener("keyup", (event) => {
+      const key = event.key.toLowerCase();
+      if (key === "w" || key === "arrowup") input.up = false;
+      if (key === "s" || key === "arrowdown") input.down = false;
+      if (key === "a" || key === "arrowleft") input.left = false;
+      if (key === "d" || key === "arrowright") input.right = false;
+    });
+
+    restartBtn.addEventListener("click", () => {
+      resetGame();
+    });
+
+    // ---------- Voice controls ----------
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    function clearMovement() {
+      input.up = false;
+      input.down = false;
+      input.left = false;
+      input.right = false;
+    }
+
+    function handleVoiceCommand(transcript) {
+      const command = transcript.toLowerCase().trim();
+
+      if (/\b(stop|wait|halt|freeze)\b/.test(command)) {
+        clearMovement();
+        voiceStatus.textContent = `Heard “${command}” — stopped`;
+        return;
+      }
+
+      let direction = null;
+      if (/\b(left|west)\b/.test(command)) direction = "left";
+      else if (/\b(right|east)\b/.test(command)) direction = "right";
+      else if (/\b(up|north|forward)\b/.test(command)) direction = "up";
+      else if (/\b(down|south|backward|back)\b/.test(command)) direction = "down";
+
+      if (!direction) {
+        voiceStatus.textContent = `Couldn’t hear a direction in “${command}”`;
+        return;
+      }
+
+      clearMovement();
+      input[direction] = true;
+      voiceStatus.textContent = `Heard “${command}”`;
+    }
+
+    function startVoiceRecognition() {
+      if (!SpeechRecognition) {
+        voiceStatus.textContent = "Voice input not supported in this browser.";
+        return;
+      }
+
+      if (!audioCtx) initAudio();
+
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = "en-US";
+
+      recognition.onresult = (event) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            handleVoiceCommand(event.results[i][0].transcript);
+          }
+        }
+      };
+
+      recognition.onerror = (event) => {
+        voiceStatus.textContent = `Voice error: ${event.error}`;
+      };
+
+      recognition.onend = () => {
+        if (voiceEnabled) {
+          try {
+            recognition.start();
+          } catch (_) {}
+        }
+      };
+
+      voiceEnabled = true;
+      voiceBtn.textContent = "Voice On";
+      voiceStatus.textContent = "Listening…";
+
+      try {
+        recognition.start();
+      } catch (_) {
+        voiceStatus.textContent = "Couldn't start listening. Try again.";
+      }
+    }
+
+    voiceBtn.addEventListener("click", () => {
+      if (voiceEnabled) {
+        voiceEnabled = false;
+        voiceBtn.textContent = "Enable Voice";
+        voiceStatus.textContent = "Voice off";
+        clearMovement();
+        recognition?.stop();
+      } else {
+        startVoiceRecognition();
+      }
+    });
+
+    // ---------- Audio ----------
+    function initAudio() {
+      const AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) return;
+
+      audioCtx = new AudioCtor();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = 0.08;
+      masterGain.connect(audioCtx.destination);
+    }
+
+    function beep(frequency, duration, type = "sine", volume = 0.08) {
+      if (!audioCtx || !masterGain || !soundEnabled) return;
+
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+
+      osc.type = type;
+      osc.frequency.value = frequency;
+
+      gain.gain.value = volume;
+      osc.connect(gain);
+      gain.connect(masterGain);
+
+      const start = audioCtx.currentTime;
+      gain.gain.setValueAtTime(volume, start);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+
+      osc.start(start);
+      osc.stop(start + duration);
+    }
+
+    function playPickupSound() {
+      beep(740, 0.08, "triangle", 0.07);
+      setTimeout(() => beep(980, 0.09, "triangle", 0.06), 50);
+    }
+
+    function playWinSound() {
+      beep(440, 0.12, "sine", 0.08);
+      setTimeout(() => beep(660, 0.12, "sine", 0.08), 90);
+      setTimeout(() => beep(880, 0.18, "sine", 0.09), 180);
+    }
+
+    function playHitSound() {
+      beep(140, 0.2, "sawtooth", 0.12);
+      setTimeout(() => beep(90, 0.24, "sawtooth", 0.11), 110);
+    }
+
+    function playRoarSound() {
+      if (!soundEnabled) return;
+      beep(60, 0.14, "sawtooth", 0.1);
+      setTimeout(() => beep(90, 0.12, "square", 0.08), 50);
+    }
+
+    soundBtn.addEventListener("click", () => {
+      soundEnabled = !soundEnabled;
+      soundBtn.textContent = `Sound: ${soundEnabled ? "On" : "Off"}`;
+      if (soundEnabled && !audioCtx) initAudio();
+    });
+
+    // ---------- Start ----------
+    resetGame();
+    updateHud();
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>
